@@ -1,0 +1,69 @@
+FROM node:18.14.2-alpine3.17 as base
+
+ARG NPM_TOKEN
+ARG DATADOG_API_KEY
+ARG DATADOG_SITE
+ARG ENV
+ARG VERSION
+ARG APP_DOMAIN
+
+ENV DD_VERSION=$VERSION
+ENV DD_ENV=$ENV
+ENV VERSION=$VERSION
+ENV APP_DOMAIN=$APP_DOMAIN
+
+# Installs latest Chromium (100) package.
+RUN apk add --no-cache \
+      chromium \
+      nss \
+      freetype \
+      harfbuzz \
+      ca-certificates \
+      ttf-freefont \
+      nodejs \
+      yarn
+
+# Tell Puppeteer to skip installing Chrome. We'll be using the installed package.
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
+
+# Puppeteer v13.5.0 works with Chromium 100.
+RUN yarn add puppeteer@13.5.0
+
+# Add user so we don't need --no-sandbox.
+RUN addgroup -S pptruser && adduser -S -G pptruser pptruser \
+    && mkdir -p /home/pptruser/Downloads /app \
+    && chown -R pptruser:pptruser /home/pptruser \
+    && chown -R pptruser:pptruser /app
+
+
+WORKDIR /usr/src/app
+
+RUN apk --no-cache add python3 make bash g++ curl
+
+RUN set -x \
+  && echo "//npm.pkg.github.com/:_authToken=$NPM_TOKEN" > .npmrc \
+  && echo "@understood:registry=https://npm.pkg.github.com" >> .npmrc
+
+COPY package*.json yarn.lock  ./
+
+RUN yarn install --frozen-lockfile --ignore-engines
+
+COPY  . .
+
+RUN yarn build
+
+# upload sourcemaps to datadog
+RUN if [ "$ENV" = "ephemeral" ] ; then \
+  npx @datadog/datadog-ci sourcemaps upload ./.next/static/chunks/ --service brand-pages --release-version ${DD_VERSION} --minified-path-prefix ${APP_DOMAIN}/_next/static/chunks/ \
+; fi
+RUN if [ "$ENV" = "qa" ] ; then \
+  npx @datadog/datadog-ci sourcemaps upload ./.next/static/chunks/ --service brand-pages --release-version ${DD_VERSION} --minified-path-prefix https://qa.understood.org/_next/static/chunks/ \
+  && npx @datadog/datadog-ci sourcemaps upload ./.next/static/chunks/ --service brand-pages --release-version ${DD_VERSION} --minified-path-prefix https://www.understood.org/_next/static/chunks/ \
+; fi
+
+EXPOSE 3006
+
+CMD node --require ./server-preload.js ./node_modules/.bin/next start --port 3006
+
+# Run everything after as non-privileged user.
+USER pptruser
